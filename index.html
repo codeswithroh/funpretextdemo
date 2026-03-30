@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pretext · Text Physics</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono&display=block" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:#07090f}
+body{cursor:none}
+canvas{display:block;position:fixed;inset:0}
+#ui{
+  position:fixed;inset:0;pointer-events:none;z-index:10;
+  display:flex;flex-direction:column;justify-content:space-between;align-items:center;
+  padding:22px 0 28px
+}
+#title{
+  color:rgba(255,255,255,.14);
+  font:10px/1 'Space Mono',monospace;
+  letter-spacing:.22em;text-transform:uppercase
+}
+#hint{
+  color:rgba(255,255,255,.1);
+  font:10px/1 'Space Mono',monospace;
+  letter-spacing:.08em;
+  margin-bottom:10px;text-align:center
+}
+nav{display:flex;gap:8px;pointer-events:all}
+button{
+  background:rgba(255,255,255,.05);
+  border:1px solid rgba(255,255,255,.09);
+  color:rgba(255,255,255,.38);
+  padding:8px 15px;border-radius:100px;cursor:pointer;
+  font:11px/1 'Space Mono',monospace;letter-spacing:.06em;
+  transition:all .2s;backdrop-filter:blur(10px);
+}
+button:hover{background:rgba(255,255,255,.11);color:rgba(255,255,255,.75);border-color:rgba(255,255,255,.2)}
+button.on{background:rgba(255,255,255,.13);color:#fff;border-color:rgba(255,255,255,.28)}
+#powered{
+  position:fixed;bottom:10px;right:16px;
+  color:rgba(255,255,255,.08);font:9px/1 'Space Mono',monospace;letter-spacing:.08em;
+  z-index:10;pointer-events:none
+}
+#loading{
+  position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+  background:#07090f;color:rgba(255,255,255,.25);
+  font:12px/1 'Space Mono',monospace;letter-spacing:.25em;
+  z-index:100;transition:opacity .6s .1s
+}
+#loading.gone{opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="loading">LOADING...</div>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="title">PRETEXT · LIVE TEXT REFLOW</div>
+  <div>
+    <div id="hint">text reflows around every obstacle in real time</div>
+    <nav>
+      <button class="on" data-i="0">⸪ raindrops</button>
+      <button data-i="1">⊕ gravity</button>
+      <button data-i="2">◎ orbit</button>
+      <button data-i="3">⌁ ufo</button>
+    </nav>
+  </div>
+</div>
+<div id="powered">@chenglou/pretext</div>
+
+<script type="module">
+import { prepareWithSegments, layoutNextLine } from 'https://cdn.jsdelivr.net/npm/@chenglou/pretext/+esm'
+
+// ── Canvas setup ─────────────────────────────────────────────────────────
+const canvas = document.getElementById('c')
+const ctx = canvas.getContext('2d')
+let W = 0, H = 0
+const resize = () => { W = canvas.width = innerWidth; H = canvas.height = innerHeight }
+resize()
+addEventListener('resize', resize)
+
+// ── Config ───────────────────────────────────────────────────────────────
+const FS = 16        // font size px
+const FL = 28        // line height px
+const FONT = `${FS}px "Space Mono", monospace`
+const PX = 52        // horizontal padding
+const PY = 52        // vertical padding
+
+// ── Text content ─────────────────────────────────────────────────────────
+// Repeated 3× so it never exhausts even on large screens
+const PARA = `The universe is under no obligation to make sense to you. Stars are born from clouds of gas and dust, collapsing under gravity, igniting nuclear fires that burn for billions of years. Light travels 186,000 miles per second yet takes eight minutes to reach us from the sun. Time slows near massive objects. Space itself bends and curves. Quantum particles exist in superposition until observed. Information cannot be destroyed. Every atom in your body was forged in the heart of a dying star. You are the universe experiencing itself. We are made of star-stuff — a way for the cosmos to know itself. The nitrogen in our DNA, the calcium in our teeth, the iron in our blood, the carbon in our apple pies were made in the interiors of collapsing stars. Somewhere, something incredible is waiting to be known. `
+const TEXT = PARA + PARA + PARA
+
+// ── Shared state ─────────────────────────────────────────────────────────
+let prepared = null
+let scene = 0
+let mx = innerWidth / 2, my = innerHeight / 2
+
+addEventListener('mousemove', e => { mx = e.clientX; my = e.clientY })
+addEventListener('touchmove', e => {
+  e.preventDefault()
+  mx = e.touches[0].clientX; my = e.touches[0].clientY
+}, { passive: false })
+
+// Stars
+const stars = Array.from({ length: 110 }, () => ({
+  x: Math.random(), y: Math.random(),
+  r: 0.3 + Math.random() * 0.9,
+  a: 0.06 + Math.random() * 0.18,
+  spd: 0.4 + Math.random() * 1.2
+}))
+
+// ── Scene 0 · Raindrops ───────────────────────────────────────────────────
+const drops = []
+let dropT = 0
+
+const spawnDrop = (ox, oy) => {
+  const x = ox ?? (PX + 50 + Math.random() * (W - PX * 2 - 100))
+  const y = oy ?? -18
+  drops.push({ x, y, vy: 3 + Math.random() * 3.5, r: 0, alpha: 1, phase: 0, cy: 0 })
+}
+
+// Pre-seed ripples on init
+const seedDrops = () => {
+  drops.length = 0
+  for (let i = 0; i < 4; i++) {
+    const x = PX + 60 + Math.random() * (W - PX * 2 - 120)
+    const cy = PY + 30 + Math.random() * (H - PY * 2 - 60)
+    drops.push({ x, y: cy, vy: 0, r: 15 + Math.random() * 40, alpha: 0.4 + Math.random() * 0.4, phase: 1, cy })
+  }
+  for (let i = 0; i < 3; i++) {
+    const x = PX + 50 + Math.random() * (W - PX * 2 - 100)
+    drops.push({ x, y: Math.random() * H * 0.5, vy: 3 + Math.random() * 3.5, r: 0, alpha: 1, phase: 0, cy: 0 })
+  }
+}
+
+const tickDrops = dt => {
+  dropT += dt
+  if (dropT > 500) {
+    dropT = 0
+    if (drops.length < 12) spawnDrop()
+  }
+  for (let i = drops.length - 1; i >= 0; i--) {
+    const d = drops[i]
+    if (d.phase === 0) {
+      d.y += d.vy
+      if (d.y > PY + 20 + Math.random() * (H - PY * 2 - 40)) {
+        d.phase = 1; d.cy = d.y
+      }
+    } else {
+      d.r += 1.1
+      d.alpha -= 0.0045
+      if (d.alpha <= 0) drops.splice(i, 1)
+    }
+  }
+}
+
+const drawDrops = () => {
+  ctx.save()
+  for (const d of drops) {
+    if (d.phase === 0) {
+      // Teardrop
+      ctx.fillStyle = `rgba(70,190,255,${d.alpha * 0.65})`
+      ctx.beginPath()
+      ctx.moveTo(d.x, d.y - 11)
+      ctx.bezierCurveTo(d.x + 4.5, d.y - 3, d.x + 4.5, d.y + 2, d.x, d.y + 6)
+      ctx.bezierCurveTo(d.x - 4.5, d.y + 2, d.x - 4.5, d.y - 3, d.x, d.y - 11)
+      ctx.fill()
+      // Highlight
+      ctx.fillStyle = `rgba(180,230,255,${d.alpha * 0.4})`
+      ctx.beginPath(); ctx.ellipse(d.x - 1.5, d.y - 5, 1.5, 3, -0.4, 0, Math.PI * 2); ctx.fill()
+    } else {
+      // Ripple rings
+      for (let k = 0; k < 3; k++) {
+        const rr = d.r - k * 10
+        if (rr < 1) continue
+        ctx.strokeStyle = `rgba(70,190,255,${d.alpha * (0.32 - k * 0.09)})`
+        ctx.lineWidth = 1.4 - k * 0.3
+        ctx.beginPath(); ctx.arc(d.x, d.cy, rr, 0, Math.PI * 2); ctx.stroke()
+      }
+    }
+  }
+  ctx.restore()
+}
+
+canvas.addEventListener('click', e => {
+  if (scene === 0) {
+    drops.push({ x: e.clientX, y: e.clientY, vy: 0, r: 0, alpha: 0.9, phase: 1, cy: e.clientY })
+  }
+})
+
+// ── Scene 1 · Gravity Bubble ──────────────────────────────────────────────
+let gx = 0, gy = 0, gvx = 0, gvy = 0
+const GR = 88
+
+const tickGrav = () => {
+  gvx = (gvx + (mx - gx) * 0.065) * 0.8
+  gvy = (gvy + (my - gy) * 0.065) * 0.8
+  gx += gvx; gy += gvy
+}
+
+const drawGrav = () => {
+  const t = Date.now() / 1000
+  // Ambient glow
+  const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, GR * 2)
+  g.addColorStop(0, 'rgba(70,255,130,.09)')
+  g.addColorStop(1, 'rgba(70,255,130,0)')
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(gx, gy, GR * 2, 0, Math.PI * 2); ctx.fill()
+  // Expanding pulse rings
+  for (let i = 0; i < 5; i++) {
+    const ph = (t * 0.65 + i * 0.2) % 1
+    ctx.beginPath(); ctx.arc(gx, gy, ph * GR * 1.5, 0, Math.PI * 2)
+    ctx.strokeStyle = `rgba(70,255,130,${(1 - ph) * 0.25})`; ctx.lineWidth = 1; ctx.stroke()
+  }
+  // Field boundary ring
+  ctx.beginPath(); ctx.arc(gx, gy, GR, 0, Math.PI * 2)
+  ctx.strokeStyle = 'rgba(70,255,130,0.18)'; ctx.lineWidth = 1.5; ctx.stroke()
+  // Core orb
+  const cr = 7 + Math.sin(t * 5) * 2
+  const gc = ctx.createRadialGradient(gx - 2, gy - 2, 0, gx, gy, cr)
+  gc.addColorStop(0, 'rgba(180,255,200,1)')
+  gc.addColorStop(1, 'rgba(60,220,110,0.85)')
+  ctx.fillStyle = gc; ctx.beginPath(); ctx.arc(gx, gy, cr, 0, Math.PI * 2); ctx.fill()
+}
+
+// ── Scene 2 · Orbiting Planets ────────────────────────────────────────────
+const planets = [
+  { a: 0,    spd: 0.009, orb: 125, r: 38, h: 8   },  // warm red
+  { a: 2.09, spd: 0.013, orb: 205, r: 27, h: 185 },  // cyan
+  { a: 4.19, spd: 0.006, orb: 165, r: 50, h: 52  },  // gold
+]
+
+const tickOrbit = () => planets.forEach(p => p.a += p.spd)
+
+const drawOrbit = () => {
+  const cx = W / 2, cy = H / 2
+  ctx.save()
+  // Orbit rings
+  planets.forEach(p => {
+    ctx.beginPath(); ctx.arc(cx, cy, p.orb, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(255,255,255,.03)'; ctx.lineWidth = 1; ctx.stroke()
+  })
+  // Sun
+  const sg = ctx.createRadialGradient(cx, cy, 0, cx, cy, 14)
+  sg.addColorStop(0, 'rgba(255,245,180,1)'); sg.addColorStop(1, 'rgba(255,200,60,0)')
+  ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(cx, cy, 14, 0, Math.PI * 2); ctx.fill()
+  // Planets + glow
+  planets.forEach(p => {
+    const x = cx + Math.cos(p.a) * p.orb, y = cy + Math.sin(p.a) * p.orb
+    // Shadow trail
+    for (let i = 1; i <= 5; i++) {
+      const ta = p.a - i * p.spd * 8
+      const tx = cx + Math.cos(ta) * p.orb, ty = cy + Math.sin(ta) * p.orb
+      ctx.fillStyle = `hsla(${p.h},80%,55%,${0.04 - i * 0.007})`
+      ctx.beginPath(); ctx.arc(tx, ty, p.r * (1 - i * 0.1), 0, Math.PI * 2); ctx.fill()
+    }
+    // Planet
+    const pg = ctx.createRadialGradient(x - p.r * 0.3, y - p.r * 0.3, 0, x, y, p.r)
+    pg.addColorStop(0, `hsla(${p.h},80%,75%,.95)`)
+    pg.addColorStop(0.5, `hsla(${p.h},75%,58%,.8)`)
+    pg.addColorStop(1, `hsla(${p.h},65%,48%,0)`)
+    ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(x, y, p.r, 0, Math.PI * 2); ctx.fill()
+  })
+  ctx.restore()
+}
+
+const obstOrbit = () => {
+  const cx = W / 2, cy = H / 2
+  return planets.map(p => ({ x: cx + Math.cos(p.a) * p.orb, y: cy + Math.sin(p.a) * p.orb, r: p.r }))
+}
+
+// ── Scene 3 · UFO ─────────────────────────────────────────────────────────
+let ux = -80, uAngle = 0
+const UFO_R = 52
+const UFO_SPEED = 1.6
+
+const tickUFO = () => {
+  ux += UFO_SPEED
+  uAngle += 0.011
+  if (ux > W + 100) ux = -100
+}
+
+const uy = () => H / 2 + Math.sin(uAngle) * (H * 0.28)
+
+const drawUFO = () => {
+  const x = ux, y = uy()
+  ctx.save()
+  // Tractor beam
+  ctx.fillStyle = 'rgba(130,210,255,.06)'
+  ctx.beginPath()
+  ctx.moveTo(x - 16, y + 20)
+  ctx.lineTo(x + 16, y + 20)
+  ctx.lineTo(x + 50, H)
+  ctx.lineTo(x - 50, H)
+  ctx.closePath(); ctx.fill()
+  // Beam edge lines
+  ctx.strokeStyle = 'rgba(130,210,255,.12)'
+  ctx.lineWidth = 1
+  ctx.beginPath(); ctx.moveTo(x - 16, y + 20); ctx.lineTo(x - 50, H); ctx.stroke()
+  ctx.beginPath(); ctx.moveTo(x + 16, y + 20); ctx.lineTo(x + 50, H); ctx.stroke()
+  // Ambient glow
+  const ga = ctx.createRadialGradient(x, y, 0, x, y, UFO_R * 1.8)
+  ga.addColorStop(0, 'rgba(100,190,255,.08)'); ga.addColorStop(1, 'rgba(100,190,255,0)')
+  ctx.fillStyle = ga; ctx.beginPath(); ctx.arc(x, y, UFO_R * 1.8, 0, Math.PI * 2); ctx.fill()
+  // Saucer body
+  ctx.fillStyle = '#4488bb'
+  ctx.beginPath(); ctx.ellipse(x, y + 7, 44, 13, 0, 0, Math.PI * 2); ctx.fill()
+  ctx.fillStyle = '#66aadd'
+  ctx.beginPath(); ctx.ellipse(x, y + 4, 37, 9, 0, 0, Math.PI * 2); ctx.fill()
+  // Dome
+  const dg = ctx.createRadialGradient(x - 6, y - 10, 0, x, y - 4, 20)
+  dg.addColorStop(0, 'rgba(190,235,255,.95)'); dg.addColorStop(1, 'rgba(100,180,230,.7)')
+  ctx.fillStyle = dg
+  ctx.beginPath(); ctx.ellipse(x, y - 4, 20, 14, 0, Math.PI, 0); ctx.fill()
+  // Rim lights
+  const lc = ['#ff7070', '#ffee70', '#70ff90', '#70aaff', '#ee70ff']
+  lc.forEach((c, i) => {
+    ctx.fillStyle = c
+    ctx.beginPath(); ctx.arc(x - 24 + i * 12, y + 7, 3.5, 0, Math.PI * 2); ctx.fill()
+    // Glow
+    const lg = ctx.createRadialGradient(x - 24 + i * 12, y + 7, 0, x - 24 + i * 12, y + 7, 8)
+    const hex = c.slice(1)
+    const rgb = `${parseInt(hex.slice(0,2),16)},${parseInt(hex.slice(2,4),16)},${parseInt(hex.slice(4,6),16)}`
+    lg.addColorStop(0, `rgba(${rgb},0.25)`)
+    lg.addColorStop(1, 'rgba(0,0,0,0)')
+    ctx.fillStyle = lg; ctx.beginPath(); ctx.arc(x - 24 + i * 12, y + 7, 8, 0, Math.PI * 2); ctx.fill()
+  })
+  ctx.restore()
+}
+
+// ── Text region calculation ───────────────────────────────────────────────
+const textRegion = (y, obstacles) => {
+  let segs = [[PX, W - PX]]
+  obstacles.forEach(o => {
+    const mid = y + FL / 2, dy = Math.abs(mid - o.y)
+    if (dy >= o.r) return
+    const hw = Math.sqrt(o.r * o.r - dy * dy)
+    const ol = o.x - hw - 6, or_ = o.x + hw + 6
+    const next = []
+    segs.forEach(([a, b]) => {
+      if (or_ <= a || ol >= b) next.push([a, b])
+      else { if (ol > a) next.push([a, ol]); if (or_ < b) next.push([or_, b]) }
+    })
+    segs = next
+  })
+  // Pick widest interval
+  let best = { x: PX, w: 0 }
+  segs.forEach(([a, b]) => { if (b - a > best.w) best = { x: a, w: b - a } })
+  return best
+}
+
+// ── Text colors per scene ─────────────────────────────────────────────────
+const TEXT_COLORS = [
+  [190, 220, 245],  // raindrops: cool blue-white
+  [195, 245, 215],  // gravity: soft green-white
+  [245, 235, 205],  // orbit: warm golden-white
+  [210, 228, 252],  // ufo: pale ice-blue
+]
+const SHADOW_COLORS = [
+  'rgba(60,160,255,.18)',
+  'rgba(60,255,130,.15)',
+  'rgba(255,210,80,.12)',
+  'rgba(100,190,255,.18)',
+]
+
+// ── Draw text ────────────────────────────────────────────────────────────
+const drawText = obstacles => {
+  if (!prepared) return
+  ctx.font = FONT
+  ctx.textBaseline = 'alphabetic'
+  ctx.shadowColor = SHADOW_COLORS[scene]
+  ctx.shadowBlur = 7
+
+  const [r, g, b] = TEXT_COLORS[scene]
+  let cur = { segmentIndex: 0, graphemeIndex: 0 }
+  let y = PY
+
+  while (y < H - PY + FL) {
+    const { x, w } = textRegion(y, obstacles)
+    if (w < 22) { y += FL; continue }
+
+    let line = layoutNextLine(prepared, cur, w)
+    if (!line) {
+      cur = { segmentIndex: 0, graphemeIndex: 0 }
+      line = layoutNextLine(prepared, cur, w)
+      if (!line) break
+    }
+    const alpha = 0.78 + 0.12 * Math.sin(y * 0.022 + Date.now() * 0.00018)
+    ctx.fillStyle = `rgba(${r},${g},${b},${alpha.toFixed(3)})`
+    ctx.fillText(line.text, x, y + 21)
+    cur = line.end
+    y += FL
+  }
+  ctx.shadowBlur = 0
+}
+
+// ── Starfield ────────────────────────────────────────────────────────────
+const drawStars = () => {
+  const t = Date.now() / 1000
+  stars.forEach(s => {
+    const flicker = 0.5 + 0.5 * Math.sin(t * s.spd + s.x * 40 + s.y * 30)
+    ctx.fillStyle = `rgba(255,255,255,${(s.a * flicker).toFixed(3)})`
+    ctx.beginPath(); ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2); ctx.fill()
+  })
+}
+
+// ── Vignette ─────────────────────────────────────────────────────────────
+const drawVignette = () => {
+  const bg = '#07090f'
+  // Top + bottom fade
+  const gv = ctx.createLinearGradient(0, 0, 0, H)
+  gv.addColorStop(0, 'rgba(7,9,15,.9)')
+  gv.addColorStop(0.1, 'rgba(7,9,15,0)')
+  gv.addColorStop(0.9, 'rgba(7,9,15,0)')
+  gv.addColorStop(1, 'rgba(7,9,15,.9)')
+  ctx.fillStyle = gv; ctx.fillRect(0, 0, W, H)
+  // Left + right fade
+  const gh = ctx.createLinearGradient(0, 0, W, 0)
+  gh.addColorStop(0, 'rgba(7,9,15,.6)')
+  gh.addColorStop(0.06, 'rgba(7,9,15,0)')
+  gh.addColorStop(0.94, 'rgba(7,9,15,0)')
+  gh.addColorStop(1, 'rgba(7,9,15,.6)')
+  ctx.fillStyle = gh; ctx.fillRect(0, 0, W, H)
+}
+
+// ── Custom cursor ─────────────────────────────────────────────────────────
+const drawCursor = () => {
+  ctx.save()
+  ctx.strokeStyle = 'rgba(255,255,255,.45)'
+  ctx.lineWidth = 1
+  ctx.beginPath(); ctx.arc(mx, my, 5.5, 0, Math.PI * 2); ctx.stroke()
+  ctx.fillStyle = 'rgba(255,255,255,.65)'
+  ctx.beginPath(); ctx.arc(mx, my, 1.8, 0, Math.PI * 2); ctx.fill()
+  ctx.restore()
+}
+
+// ── Scene label ──────────────────────────────────────────────────────────
+const LABELS = ['click to spawn ripples', 'move mouse — field follows with spring physics', 'text flows between 3 orbiting planets', 'ufo traces a sine wave through the text']
+let labelAlpha = 1
+let labelScene = 0
+
+const drawLabel = () => {
+  if (scene !== labelScene) { labelAlpha = 1; labelScene = scene }
+  labelAlpha = Math.max(0, labelAlpha - 0.003)
+  if (labelAlpha < 0.01) return
+  ctx.save()
+  ctx.font = '10px "Space Mono", monospace'
+  ctx.textBaseline = 'alphabetic'
+  ctx.fillStyle = `rgba(255,255,255,${(labelAlpha * 0.18).toFixed(3)})`
+  const label = LABELS[scene]
+  const tw = ctx.measureText(label).width
+  ctx.fillText(label, W / 2 - tw / 2, H - 70)
+  ctx.restore()
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────
+let last = 0
+const loop = ts => {
+  const dt = Math.min(ts - last, 50)
+  last = ts
+
+  ctx.fillStyle = '#07090f'
+  ctx.fillRect(0, 0, W, H)
+
+  drawStars()
+
+  let obs = []
+  switch (scene) {
+    case 0:
+      tickDrops(dt)
+      drawDrops()
+      obs = drops.filter(d => d.phase === 1).map(d => ({ x: d.x, y: d.cy, r: d.r * 0.82 }))
+      break
+    case 1:
+      tickGrav()
+      drawGrav()
+      obs = [{ x: gx, y: gy, r: GR }]
+      break
+    case 2:
+      tickOrbit()
+      drawOrbit()
+      obs = obstOrbit()
+      break
+    case 3:
+      tickUFO()
+      drawUFO()
+      obs = [{ x: ux, y: uy(), r: UFO_R }]
+      break
+  }
+
+  drawText(obs)
+  drawVignette()
+  drawLabel()
+  drawCursor()
+  requestAnimationFrame(loop)
+}
+
+// ── Scene switch ──────────────────────────────────────────────────────────
+document.querySelectorAll('button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    scene = +btn.dataset.i
+    document.querySelectorAll('button').forEach(b => b.classList.remove('on'))
+    btn.classList.add('on')
+    // Reset per-scene state
+    if (scene === 0) seedDrops()
+    if (scene === 1) { gx = mx || W / 2; gy = my || H / 2; gvx = 0; gvy = 0 }
+    if (scene === 3) { ux = -100; uAngle = 0 }
+  })
+})
+
+// ── Init ─────────────────────────────────────────────────────────────────
+await document.fonts.ready
+prepared = prepareWithSegments(TEXT, FONT)
+gx = innerWidth / 2; gy = innerHeight / 2
+seedDrops()
+document.getElementById('loading').classList.add('gone')
+requestAnimationFrame(loop)
+</script>
+</body>
+</html>
