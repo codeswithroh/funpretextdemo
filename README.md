@@ -2,7 +2,7 @@
 
 A fun interactive demo showcasing [@chenglou/pretext](https://github.com/chenglou/pretext) — a library for fast, accurate multiline text measurement and layout without touching the DOM.
 
-**Live demo → [lovely-granita-7f5362.netlify.app](https://lovely-granita-7f5362.netlify.app)**
+**Live demo → [pretext-demo.netlify.app]([https://lovely-granita-7f5362.netlify.app](https://pretext-demo.netlify.app/))**
 
 ## What it demonstrates
 
